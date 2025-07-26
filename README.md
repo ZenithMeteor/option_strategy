@@ -1,1 +1,1 @@
-# option_strategy
+# 利用AI寫得簡易美股選擇權分析工具
