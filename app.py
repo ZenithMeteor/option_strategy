@@ -39,32 +39,25 @@ def calculate_us_margin(strategy_name, strategy_details, multiplier):
             margin = (k_calls[1] - k_calls[0]) * multiplier
     return margin
 
-# --- Streamlit UI 介面 ---
+# --- Streamlit UI 介面 (無變動) ---
 st.set_page_config(layout="wide")
 st.title("📈 美股選擇權策略分析器 (US Options Strategy Analyzer)")
 st.write("此工具根據標準美股選擇權規則，視覺化策略的損益與分析所需資金。")
 
-# --- 側邊欄輸入 ---
+# --- 側邊欄輸入 (無變動) ---
 st.sidebar.header("⚙️ 參數設定")
 multiplier = st.sidebar.number_input("契約乘數 (Contract Multiplier)", value=100, help="美股選擇權的契約乘數固定為 100。")
-
 strategy_name = st.sidebar.selectbox(
     "選擇策略 (Select Strategy)",
     ["Bull Call Spread", "Bear Put Spread", "Bull Put Spread", "Bear Call Spread", "Butterfly Spread", "Iron Condor"]
 )
-
 st.sidebar.markdown("---")
-# CHANGED: 將策略說明放入一個可折疊的 st.expander 中
 with st.sidebar.expander(f"📖 查看「{strategy_name}」策略說明"):
     st.markdown(STRATEGY_DESCRIPTIONS[strategy_name], unsafe_allow_html=True)
 st.sidebar.markdown("---")
 
-
-strategy_details = []
-strikes = []
-error_message = ""
-
 # --- 參數輸入區塊 (無變動) ---
+strategy_details, strikes, error_message = [], [], ""
 if strategy_name == "Bull Call Spread":
     st.sidebar.subheader("買權多頭價差 (看漲)")
     k_low = st.sidebar.number_input("買進買權履約價 (Long Call)", value=100.0, step=1.0)
@@ -132,7 +125,7 @@ elif strategy_name == "Iron Condor":
     strikes = [k_lp, k_sp, k_sc, k_lc]
 
 
-# --- 主面板顯示區塊 (無變動) ---
+# --- 主面板顯示區塊 ---
 if error_message:
     st.error(f"**輸入錯誤：** {error_message}", icon="🚨")
     st.warning("請修正左側側邊欄的履約價以繼續分析。")
@@ -147,12 +140,24 @@ elif strategy_details:
     net_cost_credit = net_premium_points * multiplier
     margin = calculate_us_margin(strategy_name, strategy_details, multiplier)
     
+    cost_basis = 0
     if net_cost_credit < 0:
-        roi = (max_profit / abs(net_cost_credit)) * 100 if net_cost_credit != 0 else float('inf')
+        cost_basis = abs(net_cost_credit)
         roi_help_text = "最大獲利 / 權利金淨支出"
     else:
-        roi = (net_cost_credit / margin) * 100 if margin > 0 else float('inf')
+        cost_basis = margin
         roi_help_text = "權利金淨收入 / 所需保證金"
+    
+    if cost_basis > 0:
+        roi_per_point = (pnl_currency / cost_basis) * 100
+    else:
+        roi_per_point = np.full_like(pnl_currency, np.nan) 
+    
+    if net_cost_credit < 0:
+        total_roi = (max_profit / cost_basis) * 100 if cost_basis > 0 else float('inf')
+    else:
+        total_roi = (net_cost_credit / cost_basis) * 100 if cost_basis > 0 else float('inf')
+
 
     st.header(f"📊 {strategy_name} 分析結果")
     col1, col2, col3, col4 = st.columns(4)
@@ -161,17 +166,50 @@ elif strategy_details:
     col2.metric("所需保證金 (Margin Req.)", f"${margin:,.2f}", help="對於 Debit Spreads，此值為$0。")
     col3.metric("最大獲利 (Max Profit)", f"${max_profit:,.2f}")
     col4.metric("最大虧損 (Max Loss)", f"${max_loss:,.2f}")
-    st.metric("保證金/成本報酬率 (ROI)", f"{roi:.1f}%", help=roi_help_text)
+    st.metric("整體報酬率 (Overall ROI)", f"{total_roi:.1f}%", help=roi_help_text)
     st.write(f"**損益兩平點 (Break-even):** {', '.join([f'{be:.2f}' for be in break_evens]) if break_evens else 'N/A'}")
     
     fig = go.Figure()
-    fig.add_trace(go.Scatter(x=S, y=pnl_currency, mode='lines', name='策略損益 (P/L)', line=dict(color='royalblue', width=3)))
+
+    custom_data = np.stack((roi_per_point,), axis=-1)
+    hovertemplate = (
+        "<b>股價 (Price):</b> %{x:$.2f}<br>" +
+        "<b>損益 (P/L):</b> %{y:$,.2f}<br>" +
+        "<b>點位報酬率 (Point ROI):</b> %{customdata[0]:.1f}%" +
+        "<extra></extra>"
+    )
+    
+    fig.add_trace(go.Scatter(
+        x=S, y=pnl_currency, customdata=custom_data, hovertemplate=hovertemplate,
+        mode='lines', name='策略損益 (P/L)', line=dict(color='royalblue', width=3)
+    ))
+    
     fig.add_hline(y=0, line_dash="dash", line_color="grey")
+
+    for be in break_evens:
+        fig.add_vline(x=be, line_dash="dash", line_color="purple", 
+                      annotation_text=f"BE: {be:.2f}",
+                      annotation_position="bottom right")
+
     for k in set(strikes):
-        fig.add_vline(x=k, line_dash="dot", line_color="red", annotation_text=f"K={k}", annotation_position="top left")
-    fig.add_trace(go.Scatter(x=S, y=pnl_currency.clip(min=0), fill='tozeroy', fillcolor='rgba(0,176,80,0.2)', mode='none', name='獲利區'))
-    fig.add_trace(go.Scatter(x=S, y=pnl_currency.clip(max=0), fill='tozeroy', fillcolor='rgba(255,82,82,0.2)', mode='none', name='虧損區'))
+        fig.add_vline(x=k, line_dash="dot", line_color="red", 
+                      annotation_text=f"K={k}", 
+                      annotation_position="top left")
+    
+    # CHANGED: 在填充區塊加入 hoverinfo='skip'
+    fig.add_trace(go.Scatter(
+        x=S, y=pnl_currency.clip(min=0), fill='tozeroy', 
+        fillcolor='rgba(0,176,80,0.2)', mode='none', name='獲利區',
+        hoverinfo='skip'  # 忽略此圖層的滑鼠事件
+    ))
+    fig.add_trace(go.Scatter(
+        x=S, y=pnl_currency.clip(max=0), fill='tozeroy', 
+        fillcolor='rgba(255,82,82,0.2)', mode='none', name='虧損區',
+        hoverinfo='skip'  # 忽略此圖層的滑鼠事件
+    ))
+    
     fig.update_layout(title=f'<b>{strategy_name} 到期損益圖 (單位: USD)</b>', xaxis_title='標的物到期價格', yaxis_title='損益 (Profit / Loss)', legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1))
+    
     st.plotly_chart(fig, use_container_width=True)
 
     st.subheader("策略組成")
